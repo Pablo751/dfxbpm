@@ -1,364 +1,269 @@
 import React, { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
 import DxfParser from 'dxf-parser';
-import bmp from 'bmp-js';
 import './App.css';
 
 const IMAGE_WIDTH = 200;
 const IMAGE_HEIGHT = 200;
 
-function App() {
-  const [bmpFiles, setBmpFiles] = useState([]);
-  const [processingStatus, setProcessingStatus] = useState('');
-  const [errors, setErrors] = useState([]);
-  const [colorMode, setColorMode] = useState('black'); // 'black' or 'original'
+/**
+ * Construye un BMP monocromo real (1 bpp) con cabecera, paleta y datos bit‑packed.
+ */
+function encode1BitBmp(width, height, monoData) {
+  const rowBytes   = Math.ceil(width / 8);
+  const paddedRow  = (rowBytes + 3) & ~3;      // cada fila múltiplo de 4 bytes
+  const biSize     = 40;                       // tamaño BITMAPINFOHEADER
+  const bfOffBits  = 14 + biSize + 2 * 4;      // fileHdr + infoHdr + paleta (2 entradas×4 bytes)
+  const imageSize  = paddedRow * height;
+  const fileSize   = bfOffBits + imageSize;
+  
+  const buf = new ArrayBuffer(fileSize);
+  const dv  = new DataView(buf);
+  let p = 0;
 
-  // Helper function to strip color from DXF content
-  const stripDxfColors = (dxfContent) => {
-    // Replace all instances of red color with black
-    // In DXF, color is often specified with "62" (color code) group code
-    // Red is often color 1 in DXF
-    let modified = dxfContent;
-    // Replace any color code 1 (red) with 0 (black)
-    modified = modified.replace(/62\s*\n\s*1/g, '62\n0');
-    return modified;
-  };
+  // === BITMAPFILEHEADER (14 bytes) ===
+  dv.setUint8 (p,   0x42);                 // 'B'
+  dv.setUint8 (p+1, 0x4D);                 // 'M'
+  dv.setUint32(p+2, fileSize, true);       p += 6;
+  dv.setUint16(p,   0, true);              p += 2; // reservado
+  dv.setUint16(p,   0, true);              p += 2; // reservado
+  dv.setUint32(p,   bfOffBits, true);      p += 4;
 
-  // Helper functions for drawing
-  function getEntityPoints(entity) {
-    const points = [];
-    if (!entity || !entity.type) return points;
+  // === BITMAPINFOHEADER (40 bytes) ===
+  dv.setUint32(p,   biSize, true);         p += 4;
+  dv.setInt32 (p,   width, true);          p += 4;
+  dv.setInt32 (p,   height, true);         p += 4;
+  dv.setUint16(p,   1, true);              p += 2; // planes
+  dv.setUint16(p,   1, true);              p += 2; // bit count = 1
+  dv.setUint32(p,   0, true);              p += 4; // BI_RGB
+  dv.setUint32(p,   imageSize, true);      p += 4; // tamaño datos
+  dv.setUint32(p,   2835, true);           p += 4; // ppmX ≈72dpi
+  dv.setUint32(p,   2835, true);           p += 4; // ppmY
+  dv.setUint32(p,   2, true);              p += 4; // colores en paleta
+  dv.setUint32(p,   0, true);              p += 4; // colores importantes
 
-    switch (entity.type) {
-      case 'LINE':
-        if (entity.vertices && entity.vertices.length > 0) {
-          points.push(...entity.vertices);
-        }
-        break;
-      case 'LWPOLYLINE':
-      case 'POLYLINE':
-        if (entity.vertices && entity.vertices.length > 0) {
-          points.push(...entity.vertices);
-        }
-        break;
-      case 'CIRCLE':
-        if (entity.center && typeof entity.radius === 'number') {
-          points.push({ x: entity.center.x - entity.radius, y: entity.center.y - entity.radius });
-          points.push({ x: entity.center.x + entity.radius, y: entity.center.y + entity.radius });
-        }
-        break;
-      case 'ARC':
-        if (entity.center && typeof entity.radius === 'number') {
-          points.push({ x: entity.center.x - entity.radius, y: entity.center.y - entity.radius });
-          points.push({ x: entity.center.x + entity.radius, y: entity.center.y + entity.radius });
-        }
-        break;
-      default:
-        break;
-    }
-    return points.filter(p => p && typeof p.x === 'number' && typeof p.y === 'number' && !isNaN(p.x) && !isNaN(p.y));
-  }
+  // === PALETA (2×4 bytes: B,G,R,0) ===
+  // índice 0 = blanco
+  dv.setUint8(p++, 255);
+  dv.setUint8(p++, 255);
+  dv.setUint8(p++, 255);
+  dv.setUint8(p++,   0);
+  // índice 1 = negro
+  dv.setUint8(p++,   0);
+  dv.setUint8(p++,   0);
+  dv.setUint8(p++,   0);
+  dv.setUint8(p++,   0);
 
-  function drawEntity(ctx, entity) {
-    if (!entity || !entity.type) return;
-    
-    // Force black stroke at entity level
-    if (colorMode === 'black') {
-      // Force black color in multiple ways
-      ctx.strokeStyle = '#000000';
-      ctx.fillStyle = '#000000';
-    } else {
-      // Use a default color if original colors should be preserved
-      ctx.strokeStyle = '#000000';
-    }
-    
-    // Remove color from entity if present
-    if (entity.color !== undefined) {
-      entity.color = 0; // 0 is black in DXF
-    }
-    
-    ctx.beginPath();
-    switch (entity.type) {
-      case 'LINE':
-        if (entity.vertices && entity.vertices.length >= 2 && entity.vertices[0] && entity.vertices[1]) {
-          ctx.moveTo(entity.vertices[0].x, entity.vertices[0].y);
-          ctx.lineTo(entity.vertices[1].x, entity.vertices[1].y);
-        }
-        break;
-      case 'LWPOLYLINE':
-      case 'POLYLINE':
-        if (entity.vertices && entity.vertices.length > 0 && entity.vertices[0]) {
-          ctx.moveTo(entity.vertices[0].x, entity.vertices[0].y);
-          for (let i = 1; i < entity.vertices.length; i++) {
-            if (entity.vertices[i]) {
-              ctx.lineTo(entity.vertices[i].x, entity.vertices[i].y);
-            }
-          }
-          if (entity.closed || entity.shape || (entity.flags && (entity.flags & 1))) {
-            ctx.closePath();
-          }
-        }
-        break;
-      case 'CIRCLE':
-        if (entity.center && typeof entity.radius === 'number' && entity.radius > 0) {
-          ctx.arc(entity.center.x, entity.center.y, entity.radius, 0, 2 * Math.PI);
-        }
-        break;
-      case 'ARC':
-        if (entity.center && typeof entity.radius === 'number' && entity.radius > 0 && typeof entity.startAngle === 'number' && typeof entity.endAngle === 'number') {
-          const startAngleRad = -(entity.startAngle * Math.PI / 180);
-          const endAngleRad = -(entity.endAngle * Math.PI / 180);
-          ctx.arc(entity.center.x, entity.center.y, entity.radius, startAngleRad, endAngleRad, true);
-        }
-        break;
-      default:
-        break;
-    }
-    // Force black stroke again just to be sure
-    if (colorMode === 'black') {
-      ctx.strokeStyle = '#000000';
-    }
-    ctx.stroke();
-  }
+  // === DATOS DE PIXELES (monoData) ===
+  const out = new Uint8Array(buf);
+  out.set(monoData, bfOffBits);
 
-  // Direct pixel manipulation to ensure black lines
-  const forceBlackLines = (imageData) => {
-    const data = imageData.data;
-    for (let i = 0; i < data.length; i += 4) {
-      // Check if pixel is reddish (high red, low green/blue)
-      if (data[i] > 150 && data[i+1] < 100 && data[i+2] < 100) {
-        data[i] = 0;       // R = 0
-        data[i+1] = 0;     // G = 0
-        data[i+2] = 0;     // B = 0
-        data[i+3] = 255;   // A = 255 (full opacity)
-      }
-      // Also convert any non-white pixel to black
-      else if (data[i] < 250 || data[i+1] < 250 || data[i+2] < 250) {
-        data[i] = 0;       // R = 0
-        data[i+1] = 0;     // G = 0
-        data[i+2] = 0;     // B = 0
-        data[i+3] = 255;   // A = 255
-      }
-    }
-    return imageData;
-  };
-
-// Convierte Uint8ClampedArray RGBA (canvas) → Uint8Array ABGR (bmp‑js)
-function rgbaToAbgr(rgbaData) {
-  const len = rgbaData.length;
-  const abgr = new Uint8Array(len);          // bmp‑js solo necesita Uint8Array
-  for (let i = 0; i < len; i += 4) {
-    abgr[i]     = rgbaData[i + 3];  // A
-    abgr[i + 1] = rgbaData[i + 2];  // B
-    abgr[i + 2] = rgbaData[i + 1];  // G
-    abgr[i + 3] = rgbaData[i];      // R
-  }
-  return abgr;
+  return out;
 }
 
-  // Main processing function
+// Sustituye colores DXF (grupo 62): rojo (1) → negro (0)
+function stripDxfColors(dxfContent) {
+  return dxfContent.replace(/62\s*\n\s*1/g, '62\n0');
+}
+
+// Extrae los puntos de cada entidad para el bounding box
+function getEntityPoints(entity) {
+  const pts = [];
+  if (!entity?.type) return pts;
+  switch (entity.type) {
+    case 'LINE':
+      if (entity.vertices?.length >= 2) pts.push(...entity.vertices);
+      break;
+    case 'LWPOLYLINE':
+    case 'POLYLINE':
+      if (entity.vertices) pts.push(...entity.vertices);
+      break;
+    case 'CIRCLE':
+      if (entity.center && typeof entity.radius === 'number') {
+        pts.push(
+          { x: entity.center.x - entity.radius, y: entity.center.y - entity.radius },
+          { x: entity.center.x + entity.radius, y: entity.center.y + entity.radius }
+        );
+      }
+      break;
+    case 'ARC':
+      if (entity.center && typeof entity.radius === 'number') {
+        pts.push(
+          { x: entity.center.x - entity.radius, y: entity.center.y - entity.radius },
+          { x: entity.center.x + entity.radius, y: entity.center.y + entity.radius }
+        );
+      }
+      break;
+    default:
+      break;
+  }
+  return pts.filter(p => isFinite(p.x) && isFinite(p.y));
+}
+
+// Traza cada entidad con stroke negro
+function drawEntity(ctx, entity) {
+  if (!entity?.type) return;
+  ctx.strokeStyle = '#000';
+  ctx.beginPath();
+  switch (entity.type) {
+    case 'LINE':
+      ctx.moveTo(entity.vertices[0].x, entity.vertices[0].y);
+      ctx.lineTo(entity.vertices[1].x, entity.vertices[1].y);
+      break;
+    case 'LWPOLYLINE':
+    case 'POLYLINE':
+      ctx.moveTo(entity.vertices[0].x, entity.vertices[0].y);
+      entity.vertices.slice(1).forEach(v => ctx.lineTo(v.x, v.y));
+      if (entity.closed || entity.shape || (entity.flags & 1)) ctx.closePath();
+      break;
+    case 'CIRCLE':
+      ctx.arc(entity.center.x, entity.center.y, entity.radius, 0, 2 * Math.PI);
+      break;
+    case 'ARC':
+      const start = -entity.startAngle * Math.PI / 180;
+      const end   = -entity.endAngle   * Math.PI / 180;
+      ctx.arc(entity.center.x, entity.center.y, entity.radius, start, end, true);
+      break;
+  }
+  ctx.stroke();
+}
+
+// Asegura que cualquier píxel no‑blanco pase a negro puro
+function forceBlackLines(imageData) {
+  const d = imageData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i] < 250 || d[i+1] < 250 || d[i+2] < 250) {
+      d[i] = d[i+1] = d[i+2] = 0;
+      d[i+3] = 255;
+    }
+  }
+  return imageData;
+}
+
+// Convierte el RGBA del canvas a un Uint8Array con 1 bit/píxel,
+// filas padded a múltiplo de 4 bytes y orden bottom‑up
+function rgbaTo1Bit(width, height, rgbaData) {
+  const rowBytes  = Math.ceil(width / 8);
+  const paddedRow = (rowBytes + 3) & ~3;
+  const out       = new Uint8Array(paddedRow * height);
+
+  for (let y = 0; y < height; y++) {
+    const rowIndex = (height - 1 - y) * paddedRow;
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      const r = rgbaData[idx], g = rgbaData[idx+1], b = rgbaData[idx+2];
+      if (r < 250 || g < 250 || b < 250) {
+        out[rowIndex + (x >> 3)] |= 0x80 >> (x & 7);
+      }
+    }
+  }
+  return out;
+}
+
+function App() {
+  const [bmpFiles, setBmpFiles]       = useState([]);
+  const [processingStatus, setStatus] = useState('');
+  const [errors, setErrors]           = useState([]);
+
   const processDxfFile = async (file) => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-
-      reader.onload = async (event) => {
+      reader.onload = async (e) => {
         try {
-          let dxfContent = event.target.result;
-          if (!dxfContent) {
-            console.warn(`Empty content for file: ${file.name}`);
-            reject({ fileName: file.name, message: 'Empty file or read error' });
-            return;
-          }
+          let content = e.target.result;
+          if (!content) throw new Error('Empty file');
+          content = stripDxfColors(content);
 
-          // Modify DXF content to force black colors before parsing
-          dxfContent = stripDxfColors(dxfContent);
-          
           const parser = new DxfParser();
           let dxf;
-          try {
-            dxf = parser.parseSync(dxfContent);
-          } catch (parseError) {
-            console.error(`DXF parsing failed for ${file.name}:`, parseError);
-            reject({ fileName: file.name, message: `DXF parsing error: ${parseError.message}` });
-            return;
-          }
+          try { dxf = parser.parseSync(content); }
+          catch (err) { throw new Error(`DXF parse error: ${err.message}`); }
 
-          if (!dxf || !dxf.entities || dxf.entities.length === 0) {
-            console.warn(`No entities found or parsed in ${file.name}`);
-            resolve(null);
-            return;
-          }
+          if (!dxf.entities?.length) return resolve(null);
+          dxf.entities.forEach(ent => ent.color = 0);
 
-          // Force color of all DXF entities to black
-          if (dxf.entities && dxf.entities.length > 0) {
-            dxf.entities.forEach(entity => {
-              if (entity) {
-                entity.color = 0; // 0 is black in DXF
-                
-                // Also adjust layer colors if they exist
-                if (entity.layer && dxf.tables && dxf.tables.layer && dxf.tables.layer.layers) {
-                  const layerName = entity.layer;
-                  if (dxf.tables.layer.layers[layerName]) {
-                    dxf.tables.layer.layers[layerName].color = 0;
-                  }
-                }
-              }
-            });
-          }
-
-          // Initialize canvas
+          // ─── Setup canvas ───────────────────────────────
           const canvas = document.createElement('canvas');
-          canvas.width = IMAGE_WIDTH;
+          canvas.width  = IMAGE_WIDTH;
           canvas.height = IMAGE_HEIGHT;
           const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            reject({ fileName: file.name, message: 'Could not get 2D context from canvas' });
-            return;
-          }
-
-          // Fill with white background
-          ctx.fillStyle = '#FFFFFF';
+          if (!ctx) throw new Error('No 2D context');
+          ctx.fillStyle = '#FFF';
           ctx.fillRect(0, 0, IMAGE_WIDTH, IMAGE_HEIGHT);
 
-          // Calculate bounding box
-          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-          let hasValidGeometry = false;
-
-          dxf.entities.forEach(entity => {
-            const points = getEntityPoints(entity);
-            if (points.length > 0) {
-              hasValidGeometry = true;
-              points.forEach(p => {
-                if (isFinite(p.x) && isFinite(p.y)) {
-                  if (p.x < minX) minX = p.x;
-                  if (p.x > maxX) maxX = p.x;
-                  if (p.y < minY) minY = p.y;
-                  if (p.y > maxY) maxY = p.y;
-                }
-              });
-            }
+          // ─── Bounding box, escala y traslado ────────────
+          let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+          dxf.entities.forEach(ent => {
+            getEntityPoints(ent).forEach(p => {
+              minX = Math.min(minX, p.x);
+              minY = Math.min(minY, p.y);
+              maxX = Math.max(maxX, p.x);
+              maxY = Math.max(maxY, p.y);
+            });
           });
+          if (minX === Infinity) return resolve(null);
+          const dw = maxX - minX || 1, dh = maxY - minY || 1;
+          const pad = 0.05;
+          const sX  = IMAGE_WIDTH  * (1 - 2*pad) / dw;
+          const sY  = IMAGE_HEIGHT * (1 - 2*pad) / dh;
+          const scale = Math.min(sX, sY);
+          const cx = (minX + maxX)/2, cy = (minY + maxY)/2;
+          const translateX = IMAGE_WIDTH/2 - cx*scale;
+          const translateY = IMAGE_HEIGHT/2 + cy*scale;
+          ctx.strokeStyle = '#000';
+          ctx.lineWidth   = 1/scale;
 
-          if (!hasValidGeometry || minX === Infinity || maxX === -Infinity) {
-            console.warn(`No processable/valid geometry found in ${file.name}`);
-            resolve(null);
-            return;
-          }
-
-          // Calculate scale and offset
-          const drawingWidth = (maxX - minX) || 1;
-          const drawingHeight = (maxY - minY) || 1;
-          const padding = 0.05;
-          const scaleX = (IMAGE_WIDTH * (1 - 2 * padding)) / drawingWidth;
-          const scaleY = (IMAGE_HEIGHT * (1 - 2 * padding)) / drawingHeight;
-          const scale = Math.min(scaleX, scaleY);
-
-          const centerX = minX + drawingWidth / 2;
-          const centerY = minY + drawingHeight / 2;
-          const translateX = IMAGE_WIDTH / 2 - centerX * scale;
-          const translateY = IMAGE_HEIGHT / 2 + centerY * scale;
-
-          // Set drawing style to black for all entities
-          ctx.strokeStyle = '#000000';
-          ctx.lineWidth = 1 / scale;
-
-          // Draw entities
+          // ─── Dibujar entidades ──────────────────────────
           ctx.save();
           ctx.translate(translateX, translateY);
           ctx.scale(scale, -scale);
-
-          dxf.entities.forEach(entity => {
-            drawEntity(ctx, entity);
-          });
-
+          dxf.entities.forEach(ent => drawEntity(ctx, ent));
           ctx.restore();
 
-          // Process the image data to ensure black lines
-          let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          imageData = forceBlackLines(imageData);
-          ctx.putImageData(imageData, 0, 0);
+          // ─── Obtener pixels y forzar negro ─────────────
+          let imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+          imgData = forceBlackLines(imgData);
+          ctx.putImageData(imgData, 0, 0);
 
-          /* ======== cambio clave aquí ======== */
-          const abgrData = rgbaToAbgr(imageData.data);  // ← conversión RGBA→ABGR
+          // ─── Convertir a 1bpp y generar BMP ────────────
+          const monoData = rgbaTo1Bit(canvas.width, canvas.height, imgData.data);
+          const bmpEncodedData = encode1BitBmp(canvas.width, canvas.height, monoData);
 
-          // Create monochrome (24 bit) BMP
-          const bmpEncodedData = bmp.encode({
-            data: abgrData,            // ← buffer ahora en el orden correcto
-            width: canvas.width,
-            height: canvas.height
-          });
-          /* =================================== */
-
-          // Convert to base64
-          let binaryString = '';
-          const bytes = new Uint8Array(bmpEncodedData.data);
-          for (let i = 0; i < bytes.byteLength; i++) {
-            binaryString += String.fromCharCode(bytes[i]);
-          }
-          const base64String = btoa(binaryString);
-          const bmpDataUrl = `data:image/bmp;base64,${base64String}`;
+          // ─── Data URL y resolución ──────────────────────
+          let bin = '';
+          new Uint8Array(bmpEncodedData).forEach(b => bin += String.fromCharCode(b));
+          const bmpDataUrl = 'data:image/bmp;base64,' + btoa(bin);
 
           resolve({
-            name: file.name.replace(/\.[^/.]+$/, "") + ".bmp",
-            dataUrl: bmpDataUrl,
+            name: file.name.replace(/\.[^/.]+$/, '') + '.bmp',
+            dataUrl: bmpDataUrl
           });
 
         } catch (err) {
-          console.error(`Error processing ${file.name}:`, err);
-          const message = err.message || (typeof err === 'string' ? err : 'Unknown processing error');
-          reject({ fileName: file.name, message: message });
+          reject({ fileName: file.name, message: err.message });
         }
       };
-
-      reader.onerror = (err) => {
-        console.error(`Error reading file ${file.name}:`, err);
-        reject({ fileName: file.name, message: 'File reading failed' });
-      };
-
+      reader.onerror = () => reject({ fileName: file.name, message: 'Read error' });
       reader.readAsText(file);
     });
   };
 
-  // Dropzone handling
-  const onDrop = useCallback(async (acceptedFiles) => {
-    setProcessingStatus(`Processing ${acceptedFiles.length} file(s)...`);
+  const onDrop = useCallback(async (files) => {
+    setStatus(`Processing ${files.length} file(s)...`);
     setBmpFiles([]);
     setErrors([]);
-    const newBmpFiles = [];
-    const currentErrors = [];
-
-    const results = await Promise.allSettled(
-      acceptedFiles.map(file => {
-        if (file.name.toLowerCase().endsWith('.dxf')) {
-          return processDxfFile(file);
-        } else {
-          console.warn(`Skipping non-DXF file: ${file.name}`);
-          return Promise.reject({ fileName: file.name, message: 'Not a DXF file' });
-        }
-      })
-    );
-
-    results.forEach((result, index) => {
-      const originalFile = acceptedFiles[index];
-      if (result.status === 'fulfilled') {
-        if (result.value) {
-          newBmpFiles.push(result.value);
-        }
-      } else {
-        console.error("Error during file processing:", result.reason);
-        const errorInfo = result.reason || {};
-        currentErrors.push({
-          fileName: errorInfo.fileName || originalFile.name,
-          message: errorInfo.message || 'Unknown processing error'
-        });
-      }
+    const results = await Promise.allSettled(files.map(f => {
+      if (f.name.toLowerCase().endsWith('.dxf')) return processDxfFile(f);
+      return Promise.reject({ fileName: f.name, message: 'Not a DXF file' });
+    }));
+    const out = [], errs = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled' && r.value) out.push(r.value);
+      else errs.push(r.reason || { fileName: files[i].name, message: 'Unknown error' });
     });
-
-    setBmpFiles(newBmpFiles);
-    setErrors(currentErrors);
-    setProcessingStatus(
-      `Processed ${acceptedFiles.length} file(s). Generated ${newBmpFiles.length} BMP(s). ${currentErrors.length > 0 ? `${currentErrors.length} error(s).` : ''}`
-    );
+    setBmpFiles(out);
+    setErrors(errs);
+    setStatus(`Processed ${files.length} files. Generated ${out.length} BMP(s).${errs.length ? ' '+errs.length+' error(s).' : ''}`);
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -373,73 +278,39 @@ function rgbaToAbgr(rgbaData) {
 
   return (
     <div className="App">
-      <h1>DXF to BMP Converter (Pure Black Lines)</h1>
-
+      <h1>DXF to BMP Converter (1‑bit Monochrome)</h1>
       <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''}`}>
         <input {...getInputProps()} />
-        {isDragActive ? (
-          <p>Drop the DXF files here ...</p>
-        ) : (
-          <p>Drag 'n' drop some DXF files here, or click to select files</p>
-        )}
-      </div>
-
-      <div className="color-toggle" style={{ margin: '15px 0' }}>
-        <label>
-          <input
-            type="radio"
-            value="black"
-            checked={colorMode === 'black'}
-            onChange={() => setColorMode('black')}
-          /> Force Black Lines
-        </label>
-        <label style={{ marginLeft: '15px' }}>
-          <input
-            type="radio"
-            value="original"
-            checked={colorMode === 'original'}
-            onChange={() => setColorMode('original')}
-          /> Original Colors
-        </label>
+        {isDragActive
+          ? <p>Drop DXF files here…</p>
+          : <p>Drag & drop DXF files here, or click to select</p>}
       </div>
 
       {processingStatus && <p className="status">{processingStatus}</p>}
 
       {errors.length > 0 && (
         <div className="errors">
-          <h2>Errors Encountered:</h2>
+          <h2>Errors:</h2>
           <ul>
-            {errors.map((error, index) => (
-              <li key={index}><strong>{error.fileName}:</strong> {error.message}</li>
-            ))}
+            {errors.map((e, i) => <li key={i}><strong>{e.fileName}:</strong> {e.message}</li>)}
           </ul>
         </div>
       )}
 
       {bmpFiles.length > 0 && (
         <div className="results">
-          <h2>Generated BMP Files:</h2>
+          <h2>Generated BMPs:</h2>
           <div className="image-grid">
-            {bmpFiles.map((bmp, index) => (
-              <div key={index} className="image-item">
+            {bmpFiles.map((b, i) => (
+              <div key={i} className="image-item">
                 <img
-                  src={bmp.dataUrl}
-                  alt={`Preview of ${bmp.name}`}
+                  src={b.dataUrl}
+                  alt={b.name}
                   width={IMAGE_WIDTH}
                   height={IMAGE_HEIGHT}
-                  style={{ 
-                    imageRendering: 'pixelated',
-                    border: '1px solid #ccc',
-                    background: 'white'
-                  }}
+                  style={{ imageRendering: 'pixelated', border: '1px solid #ccc', background: '#fff' }}
                 />
-                <a
-                  href={bmp.dataUrl}
-                  download={bmp.name}
-                  style={{ marginTop: '10px', display: 'inline-block' }}
-                >
-                  Download {bmp.name}
-                </a>
+                <a href={b.dataUrl} download={b.name}>Download {b.name}</a>
               </div>
             ))}
           </div>

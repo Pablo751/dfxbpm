@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "bmp-js": "^0.1.0",
+    "bmp-ts": "^1.0.9",
     "buffer": "^6.0.3",
     "dxf-parser": "^1.1.2",
     "react": "^19.0.0",
