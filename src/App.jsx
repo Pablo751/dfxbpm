@@ -107,26 +107,48 @@ function drawEntity(ctx, entity) {
   ctx.beginPath();
   switch (entity.type) {
     case 'LINE':
-      ctx.moveTo(entity.vertices[0].x, entity.vertices[0].y);
-      ctx.lineTo(entity.vertices[1].x, entity.vertices[1].y);
+      if (entity.vertices?.length >= 2) {
+        ctx.moveTo(entity.vertices[0].x, entity.vertices[0].y);
+        ctx.lineTo(entity.vertices[1].x, entity.vertices[1].y);
+      }
       break;
     case 'LWPOLYLINE':
     case 'POLYLINE':
-      ctx.moveTo(entity.vertices[0].x, entity.vertices[0].y);
-      entity.vertices.slice(1).forEach(v => ctx.lineTo(v.x, v.y));
-      if (entity.closed || entity.shape || (entity.flags & 1)) ctx.closePath();
+      if (entity.vertices?.length > 0) {
+        ctx.moveTo(entity.vertices[0].x, entity.vertices[0].y);
+        entity.vertices.slice(1).forEach(v => {
+          if (v && isFinite(v.x) && isFinite(v.y)) {
+            ctx.lineTo(v.x, v.y);
+          }
+        });
+        if (entity.closed || entity.shape || (entity.flags & 1)) {
+          ctx.closePath();
+        }
+      }
       break;
     case 'CIRCLE':
-      ctx.arc(entity.center.x, entity.center.y, entity.radius, 0, 2 * Math.PI);
+      if (entity.center && typeof entity.radius === 'number') {
+        ctx.arc(entity.center.x, entity.center.y, entity.radius, 0, 2 * Math.PI);
+      }
       break;
     case 'ARC':
-      const start = -entity.startAngle * Math.PI / 180;
-      const end   = -entity.endAngle   * Math.PI / 180;
-      ctx.arc(entity.center.x, entity.center.y, entity.radius, start, end, true);
+      if (
+        entity.center &&
+        typeof entity.radius === 'number' &&
+        typeof entity.startAngle === 'number' &&
+        typeof entity.endAngle === 'number'
+      ) {
+        const start = -entity.startAngle * Math.PI / 180;
+        const end = -entity.endAngle * Math.PI / 180;
+        ctx.arc(entity.center.x, entity.center.y, entity.radius, start, end, true);
+      }
+      break;
+    default:
       break;
   }
   ctx.stroke();
 }
+
 
 // Asegura que cualquier píxel no‑blanco pase a negro puro
 function forceBlackLines(imageData) {
