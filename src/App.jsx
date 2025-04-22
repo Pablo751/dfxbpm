@@ -43,15 +43,16 @@ function encode1BitBmp(width, height, monoData) {
   dv.setUint32(p,   0, true);              p += 4; // colores importantes
 
   // === PALETA (2×4 bytes: B,G,R,0) ===
-  // índice 0 = blanco
+  // New (Inverted Palette):
+  // índice 0 = negro
+  dv.setUint8(p++,   0);
+  dv.setUint8(p++,   0);
+  dv.setUint8(p++,   0);
+  dv.setUint8(p++,   0);
+  // índice 1 = blanco
   dv.setUint8(p++, 255);
   dv.setUint8(p++, 255);
   dv.setUint8(p++, 255);
-  dv.setUint8(p++,   0);
-  // índice 1 = negro
-  dv.setUint8(p++,   0);
-  dv.setUint8(p++,   0);
-  dv.setUint8(p++,   0);
   dv.setUint8(p++,   0);
 
   // === DATOS DE PIXELES (monoData) ===
