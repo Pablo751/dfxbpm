@@ -11,8 +11,8 @@ import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import './App.css';
 
-const IMAGE_WIDTH  = 180;
-const IMAGE_HEIGHT = 180;
+const IMAGE_WIDTH  = 175;
+const IMAGE_HEIGHT = 175;
 
 /*──────────────── BMP 1 bpp ────────────────*/
 function encode1BitBmp(width, height, monoData) {
