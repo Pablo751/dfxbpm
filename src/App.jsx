@@ -10,7 +10,19 @@ import DxfParser from 'dxf-parser';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import './App.css';
+import tex1 from './assets/texture_felt.png';    
+import tex2 from './assets/texture_plate.png'; 
 
+
+const MODES = [
+  { value: 'BMP',       label: 'BMP 1‑bit (lines)' },
+  { value: 'PNG_FILL',  label: 'PNG Black Fill' },
+  { value: 'PNG_TEX1',  label: 'PNG Carpet' },
+  { value: 'PNG_TEX2',  label: 'PNG Rubber' },
+];
+
+const TEX1_SCALE = 1;   // rubber mat   (0.25 ≈ 4× denser than original)
+const TEX2_SCALE = 0.5;      // diamond plate (unchanged)
 const IMAGE_WIDTH  = 175;
 const IMAGE_HEIGHT = 175;
 const RENDER_SCALE = 4;
@@ -184,116 +196,166 @@ function App() {
   const [status,       setStatus]   = useState('');
   const [errors,       setErrors]   = useState([]);
 
-  /* DXF → Imagen (BMP o PNG) */
-  const processDxfFile = (file, outMode) =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        try {
-          let txt = reader.result;
-          if (!txt) throw new Error('Empty file');
-          txt = stripDxfColors(txt);
+/* Create a repeat pattern scaled by <scale> even on old browsers */
+function createScaledPattern(ctx, img, scale) {
+  if (scale === 1) return ctx.createPattern(img, 'repeat');
 
-          const parser = new DxfParser();
-          const dxf = parser.parseSync(txt);
-          if (!dxf.entities?.length) return resolve(null);
+  /* Modern browsers (CanvasPattern.setTransform) */
+  const pat = ctx.createPattern(img, 'repeat');
+  if (pat && typeof pat.setTransform === 'function') {
+    const m = new DOMMatrix();
+    m.a = m.d = scale;          // scale X & Y
+    pat.setTransform(m);
+    return pat;
+  }
 
-          dxf.entities.forEach(e => e.color = 0);
+  /* Fallback: draw the image into a smaller off‑screen tile */
+  const w = Math.max(1, Math.round(img.width  * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const tile = document.createElement('canvas');
+  tile.width = w; tile.height = h;
+  tile.getContext('2d').drawImage(img, 0, 0, w, h);
+  return ctx.createPattern(tile, 'repeat');
+}
 
-          /* ───── canvas y contexto (≥res para PNG) ───── */
-          const scaleFactor = outMode === 'PNG' ? RENDER_SCALE : 1;
-          const canvas = document.createElement('canvas');
-          canvas.width  = IMAGE_WIDTH  * scaleFactor;
-          canvas.height = IMAGE_HEIGHT * scaleFactor;
-          const ctx = canvas.getContext('2d');
 
+/* DXF → Image (BMP / PNG) – now with robust pattern‑scaling */
+/* DXF → Image (BMP / PNG) – handles scaling robustly */
+const processDxfFile = (file, outMode) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        let txt = reader.result;
+        if (!txt) throw new Error('Empty file');
+        txt = stripDxfColors(txt);
+
+        const parser = new DxfParser();
+        const dxf = parser.parseSync(txt);
+        if (!dxf.entities?.length) return resolve(null);
+
+        /* Canvas --------------------------------------------------- */
+        const scaleFactor = outMode === 'BMP' ? 1 : RENDER_SCALE;
+        const canvas = document.createElement('canvas');
+        canvas.width  = IMAGE_WIDTH  * scaleFactor;
+        canvas.height = IMAGE_HEIGHT * scaleFactor;
+        const ctx = canvas.getContext('2d');
+
+        /* Background (only for BMP & solid‑black PNG) -------------- */
+        if (outMode === 'BMP' || outMode === 'PNG_FILL') {
           ctx.fillStyle = '#FFF';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
 
-          /* bbox y transformaciones */
-          let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
-          dxf.entities.forEach(e => getEntityPoints(e).forEach(p=>{
-            minX=Math.min(minX,p.x); minY=Math.min(minY,p.y);
-            maxX=Math.max(maxX,p.x); maxY=Math.max(maxY,p.y);
-          }));
-          if (minX === Infinity) return resolve(null);
+        /* BBox & transform ----------------------------------------- */
+        let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+        dxf.entities.forEach(e => getEntityPoints(e).forEach(p=>{
+          minX=Math.min(minX,p.x); minY=Math.min(minY,p.y);
+          maxX=Math.max(maxX,p.x); maxY=Math.max(maxY,p.y);
+        }));
+        if (minX===Infinity) return resolve(null);
 
-          const dw = maxX - minX || 1, dh = maxY - minY || 1;
-          const pad = 0.05;
-          const sx = canvas.width  * (1 - 2*pad) / dw,
-                sy = canvas.height * (1 - 2*pad) / dh,
-                scale = Math.min(sx, sy);
-          const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-          const tx = canvas.width  / 2 - cx * scale,
-                ty = canvas.height / 2 + cy * scale;
-          ctx.lineWidth = 1 / scale;
+        const dw=maxX-minX||1, dh=maxY-minY||1, pad=0.05;
+        const sx=canvas.width *(1-2*pad)/dw,
+              sy=canvas.height*(1-2*pad)/dh,
+              scale=Math.min(sx,sy);
+        const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
+        const tx=canvas.width /2 - cx*scale,
+              ty=canvas.height/2 + cy*scale;
+        ctx.lineWidth = 1/scale;
 
-          /* ───── dibujado ───── */
-          ctx.save();
-          ctx.translate(tx, ty);
-          ctx.scale(scale, -scale);
+        /* 1: silhouette (or just lines) ---------------------------- */
+        ctx.save();
+        ctx.translate(tx,ty);
+        ctx.scale(scale,-scale);
 
-          if (outMode === 'PNG') {
-            /* 1º: figuras/pl → relleno negro */
-            dxf.entities
-              .filter(e => e.type !== 'CIRCLE' && e.type !== 'ARC')
-              .forEach(e => drawEntity(ctx, e, true));
+        const fillShapes = outMode !== 'BMP';
+        dxf.entities
+          .filter(e => e.type!=='CIRCLE' && e.type!=='ARC')
+          .forEach(e => drawEntity(ctx,e,fillShapes));
 
-            /* 2º: círculos/arcos → recorte blanco */
-            ctx.globalCompositeOperation = 'destination-out';
-            dxf.entities
-              .filter(e => e.type === 'CIRCLE' || e.type === 'ARC')
-              .forEach(e => drawEntity(ctx, e, true));
+        /* 2: punch circular holes ---------------------------------- */
+        if (outMode !== 'BMP') {
+          ctx.globalCompositeOperation = 'destination-out';
+          dxf.entities
+            .filter(e => e.type==='CIRCLE' || e.type==='ARC')
+            .forEach(e => drawEntity(ctx,e,true));
+          ctx.globalCompositeOperation = 'source-over';
+        }
+        ctx.restore();
 
-            ctx.globalCompositeOperation = 'source-over';
-          } else {
-            /* BMP: sólo líneas negras */
-            dxf.entities.forEach(e => drawEntity(ctx, e, false));
+        const baseName = file.name.replace(/\.[^/.]+$/, '');
+
+        /* ---------- BMP output ------------------------------------ */
+        if (outMode === 'BMP') {
+          let imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+          imgData = forceBlackLines(imgData);
+          ctx.putImageData(imgData,0,0);
+
+          const mono = rgbaTo1Bit(canvas.width,canvas.height,imgData.data);
+          const bmp  = encode1BitBmp(canvas.width,canvas.height,mono);
+
+          let bin=''; new Uint8Array(bmp).forEach(b=>bin+=String.fromCharCode(b));
+          return resolve({
+            name: `${baseName}.bmp`,
+            dataUrl: `data:image/bmp;base64,${btoa(bin)}`
+          });
+        }
+
+        /* ---------- Solid‑black PNG ------------------------------- */
+        if (outMode === 'PNG_FILL') {
+          let outCan = canvas;
+          if (scaleFactor!==1) {
+            outCan = document.createElement('canvas');
+            outCan.width=IMAGE_WIDTH; outCan.height=IMAGE_HEIGHT;
+            outCan.getContext('2d').drawImage(canvas,0,0,outCan.width,outCan.height);
           }
+          return resolve({
+            name: `${baseName}.png`,
+            dataUrl: outCan.toDataURL('image/png')
+          });
+        }
 
+        /* ---------- PNG with texture ------------------------------ */
+        const texSrc   = outMode==='PNG_TEX1' ? tex1 : tex2;
+        const texScale = outMode==='PNG_TEX1' ? TEX1_SCALE : TEX2_SCALE;
+
+        const texImg = new Image();
+        texImg.src = texSrc;
+        texImg.onload = () => {
+          const pattern = createScaledPattern(ctx, texImg, texScale);
+
+          ctx.save();
+          ctx.globalCompositeOperation = 'source-in';
+          ctx.fillStyle = pattern;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.restore();
 
-          /* ───── salida según modo ───── */
-          if (outMode === 'BMP') {
-            let imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            imgData = forceBlackLines(imgData);
-            ctx.putImageData(imgData, 0, 0);
+          ctx.save();
+          ctx.globalCompositeOperation = 'destination-over';
+          ctx.fillStyle = '#FFF';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.restore();
 
-            const mono = rgbaTo1Bit(canvas.width, canvas.height, imgData.data);
-            const bmp  = encode1BitBmp(canvas.width, canvas.height, mono);
-
-            let bin = ''; new Uint8Array(bmp).forEach(b => bin += String.fromCharCode(b));
-            const dataUrl = 'data:image/bmp;base64,' + btoa(bin);
-
-            resolve({
-              name: file.name.replace(/\.[^/.]+$/, '') + '.bmp',
-              dataUrl
-            });
-
-          } else { /* PNG */
-            /* si se renderizó a más resolución, se reduce para guardar */
-            let exportCanvas = canvas;
-            if (scaleFactor !== 1) {
-              const c2 = document.createElement('canvas');
-              c2.width  = IMAGE_WIDTH;
-              c2.height = IMAGE_HEIGHT;
-              const c2ctx = c2.getContext('2d');
-              c2ctx.drawImage(canvas, 0, 0, c2.width, c2.height);
-              exportCanvas = c2;
-            }
-            const dataUrl = exportCanvas.toDataURL('image/png');
-            resolve({
-              name: file.name.replace(/\.[^/.]+$/, '') + '.png',
-              dataUrl
-            });
+          let outCan = canvas;
+          if (scaleFactor!==1) {
+            outCan = document.createElement('canvas');
+            outCan.width=IMAGE_WIDTH; outCan.height=IMAGE_HEIGHT;
+            outCan.getContext('2d').drawImage(canvas,0,0,outCan.width,outCan.height);
           }
+          resolve({
+            name: `${baseName}.png`,
+            dataUrl: outCan.toDataURL('image/png')
+          });
+        };
+        texImg.onerror = () =>
+          reject({ fileName: file.name, message: 'Texture load error' });
 
-        } catch(err){reject({fileName:file.name, message:err.message});}
-      };
-      reader.onerror = () => reject({fileName:file.name, message:'Read error'});
-      reader.readAsText(file);
-    });
-
+      } catch(err){ reject({ fileName: file.name, message: err.message }); }
+    };
+    reader.onerror = () => reject({ fileName: file.name, message: 'Read error' });
+    reader.readAsText(file);
+  });
 
   /* drag‑and‑drop */
   const onDrop = useCallback(async (files) => {
@@ -340,19 +402,17 @@ function App() {
       <h1>DXF → {mode === 'BMP' ? 'BMP (1‑bit)' : 'PNG (Filled Black)'} Converter</h1>
 
       <label className="mode-toggle">
-        <input
-          type="checkbox"
-          checked={mode === 'PNG'}
-          onChange={e => setMode(e.target.checked ? 'PNG' : 'BMP')}
-        />
-        High Quality black filled PNG
+        Mode:&nbsp;
+        <select value={mode} onChange={e => setMode(e.target.value)}>
+          {MODES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+        </select>
       </label>
 
       <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''}`}>
         <input {...getInputProps()} />
         {isDragActive
-          ? <p>Suelta los DXF aquí…</p>
-          : <p>Arrastra DXF aquí o haz clic para seleccionar</p>}
+          ? <p>Drop DFX files here…</p>
+          : <p>Drop DFX files here or click to select</p>}
       </div>
 
       {status && <p className="status">{status}</p>}
