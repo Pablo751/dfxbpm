@@ -91,12 +91,8 @@ function getEntityPoints(ent) {
 
 function drawEntity(ctx, ent) {
   if (!ent?.type) return;
-  ctx.strokeStyle = '#000'; // Outlines will be black
-  ctx.fillStyle = '#000';   // Fills will be black
+  ctx.strokeStyle = '#000';
   ctx.beginPath();
-
-  let isFillable = false; // Helper flag to decide if we should fill
-
   switch (ent.type) {
     case 'LINE':
       if (ent.vertices?.length >= 2) {
@@ -111,43 +107,25 @@ function drawEntity(ctx, ent) {
         ent.vertices.slice(1).forEach(v => {
           if (v && isFinite(v.x) && isFinite(v.y)) ctx.lineTo(v.x, v.y);
         });
-        if (ent.closed || ent.shape || (ent.flags & 1)) {
-          ctx.closePath();
-          isFillable = true; // Mark as fillable if closed
-        }
+        if (ent.closed || ent.shape || (ent.flags & 1)) ctx.closePath();
       }
       break;
     case 'CIRCLE':
-      if (ent.center && typeof ent.radius === 'number') {
+      if (ent.center && typeof ent.radius === 'number')
         ctx.arc(ent.center.x, ent.center.y, ent.radius, 0, 2 * Math.PI);
-        isFillable = true; // Circles are always fillable
-      }
       break;
     case 'ARC':
-      // Standalone ARCs are generally not filled.
-      // If an ARC is part of a closed POLYLINE, the POLYLINE's logic will handle filling.
       if (ent.center && typeof ent.radius === 'number' &&
           typeof ent.startAngle === 'number' && typeof ent.endAngle === 'number') {
-        // The original arc drawing logic using negative angles and anticlockwise=true
-        // attempts to map DXF's CCW angle system to canvas.
-        // For DXF: Angles are CCW. 0 is East.
-        // For Canvas: Angles are CW. 0 is East.
-        // To draw a DXF arc (e.g., 0 to 90 deg CCW) on canvas:
-        // canvasStart = -dxfStartAngleRad, canvasEnd = -dxfEndAngleRad, anticlockwise = true
-        // This is what the original code does.
         const a0 = -ent.startAngle * Math.PI / 180;
         const a1 = -ent.endAngle   * Math.PI / 180;
-        ctx.arc(ent.center.x, ent.center.y, ent.radius, a0, a1, true); // Draw CCW from a0 to a1
+        ctx.arc(ent.center.x, ent.center.y, ent.radius, a0, a1, true);
       }
       break;
     default:
       break;
   }
-
-  if (isFillable) {
-    ctx.fill(); // Fill the path if it's marked as fillable
-  }
-  ctx.stroke(); // Always stroke the outline
+  ctx.stroke();
 }
 
 /* fuerza negro puro */
