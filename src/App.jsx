@@ -1,8 +1,8 @@
-/*  App.jsx ─ DXF → BMP monocromo (1 bpp)
-    Versión con:
-      • Paleta corregida (índice 0 = negro, 1 = blanco)
-      • Botón **Download All** que empaqueta todos los BMP en un ZIP
-        (usa jszip + file‑saver)
+/*  App.jsx ─ DXF → Imagen (BMP 1‑bit o PNG relleno)
+    • Modo A: BMP monocromo (líneas negras, sin relleno)
+    • Modo B: PNG – Figuras negras rellenas, bordes suavizados, huecos blancos
+    • Casilla para alternar modos
+    • Botón “Download All” empaqueta BMP/PNG generados en un ZIP
 */
 import React, { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
@@ -13,6 +13,7 @@ import './App.css';
 
 const IMAGE_WIDTH  = 175;
 const IMAGE_HEIGHT = 175;
+const RENDER_SCALE = 4;
 
 /*──────────────── BMP 1 bpp ────────────────*/
 function encode1BitBmp(width, height, monoData) {
@@ -48,10 +49,8 @@ function encode1BitBmp(width, height, monoData) {
   dv.setUint32(p,   2, true);              p += 4;
   dv.setUint32(p,   0, true);              p += 4;
 
-  /* PALETA */
-  // 0 = negro
-  dv.setUint8(p++, 0);  dv.setUint8(p++, 0);  dv.setUint8(p++, 0);  dv.setUint8(p++, 0);
-  // 1 = blanco
+  /* PALETA  – 0 = negro, 1 = blanco */
+  dv.setUint8(p++, 0);   dv.setUint8(p++, 0);   dv.setUint8(p++, 0);   dv.setUint8(p++, 0);
   dv.setUint8(p++, 255); dv.setUint8(p++, 255); dv.setUint8(p++, 255); dv.setUint8(p++, 0);
 
   /* PIXELS */
@@ -89,10 +88,18 @@ function getEntityPoints(ent) {
   return pts.filter(p => isFinite(p.x) && isFinite(p.y));
 }
 
-function drawEntity(ctx, ent) {
+/*  Dibuja una entidad DXF.
+    • stroke siempre (líneas)
+    • fill opcional para figuras cerradas (modo PNG)
+*/
+function drawEntity(ctx, ent, fillShapes = false) {
   if (!ent?.type) return;
   ctx.strokeStyle = '#000';
+  ctx.fillStyle   = '#000';
   ctx.beginPath();
+
+  let isClosedShape = false;
+
   switch (ent.type) {
     case 'LINE':
       if (ent.vertices?.length >= 2) {
@@ -100,6 +107,7 @@ function drawEntity(ctx, ent) {
         ctx.lineTo(ent.vertices[1].x, ent.vertices[1].y);
       }
       break;
+
     case 'LWPOLYLINE':
     case 'POLYLINE':
       if (ent.vertices?.length > 0) {
@@ -107,13 +115,20 @@ function drawEntity(ctx, ent) {
         ent.vertices.slice(1).forEach(v => {
           if (v && isFinite(v.x) && isFinite(v.y)) ctx.lineTo(v.x, v.y);
         });
-        if (ent.closed || ent.shape || (ent.flags & 1)) ctx.closePath();
+        if (ent.closed || ent.shape || (ent.flags & 1)) {
+          ctx.closePath();
+          isClosedShape = true;
+        }
       }
       break;
+
     case 'CIRCLE':
-      if (ent.center && typeof ent.radius === 'number')
+      if (ent.center && typeof ent.radius === 'number') {
         ctx.arc(ent.center.x, ent.center.y, ent.radius, 0, 2 * Math.PI);
+        isClosedShape = true;
+      }
       break;
+
     case 'ARC':
       if (ent.center && typeof ent.radius === 'number' &&
           typeof ent.startAngle === 'number' && typeof ent.endAngle === 'number') {
@@ -122,13 +137,16 @@ function drawEntity(ctx, ent) {
         ctx.arc(ent.center.x, ent.center.y, ent.radius, a0, a1, true);
       }
       break;
+
     default:
       break;
   }
+
   ctx.stroke();
+  if (fillShapes && isClosedShape) ctx.fill('evenodd');
 }
 
-/* fuerza negro puro */
+/* fuerza negro puro (antialias → líneas suaves pero negras) */
 function forceBlackLines(imgData) {
   const d = imgData.data;
   for (let i = 0; i < d.length; i += 4) {
@@ -140,7 +158,7 @@ function forceBlackLines(imgData) {
   return imgData;
 }
 
-/* RGBA → 1 bpp (bottom‑up, padded)  – bit 1 = blanco, bit 0 = negro */
+/* RGBA → 1 bpp (bottom‑up, padded) – bit 1 = blanco, 0 = negro */
 function rgbaTo1Bit(w, h, rgba) {
   const rowBytes  = Math.ceil(w / 8);
   const paddedRow = (rowBytes + 3) & ~3;
@@ -161,12 +179,13 @@ function rgbaTo1Bit(w, h, rgba) {
 
 /*─────────────────── componente ───────────────────*/
 function App() {
-  const [bmpFiles, setBmpFiles]       = useState([]);
-  const [processingStatus, setStatus] = useState('');
-  const [errors, setErrors]           = useState([]);
+  const [filesOut,     setFilesOut] = useState([]);   // {name,dataUrl}
+  const [mode,         setMode]     = useState('BMP'); // 'BMP' | 'PNG'
+  const [status,       setStatus]   = useState('');
+  const [errors,       setErrors]   = useState([]);
 
-  /* DXF → BMP */
-  const processDxfFile = (file) =>
+  /* DXF → Imagen (BMP o PNG) */
+  const processDxfFile = (file, outMode) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
@@ -181,72 +200,120 @@ function App() {
 
           dxf.entities.forEach(e => e.color = 0);
 
+          /* ───── canvas y contexto (≥res para PNG) ───── */
+          const scaleFactor = outMode === 'PNG' ? RENDER_SCALE : 1;
           const canvas = document.createElement('canvas');
-          canvas.width = IMAGE_WIDTH; canvas.height = IMAGE_HEIGHT;
+          canvas.width  = IMAGE_WIDTH  * scaleFactor;
+          canvas.height = IMAGE_HEIGHT * scaleFactor;
           const ctx = canvas.getContext('2d');
-          ctx.fillStyle = '#FFF';
-          ctx.fillRect(0,0,IMAGE_WIDTH,IMAGE_HEIGHT);
 
-          /* bbox y transform */
+          ctx.fillStyle = '#FFF';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          /* bbox y transformaciones */
           let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
           dxf.entities.forEach(e => getEntityPoints(e).forEach(p=>{
             minX=Math.min(minX,p.x); minY=Math.min(minY,p.y);
             maxX=Math.max(maxX,p.x); maxY=Math.max(maxY,p.y);
           }));
-          if (minX===Infinity) return resolve(null);
+          if (minX === Infinity) return resolve(null);
 
-          const dw=maxX-minX||1, dh=maxY-minY||1;
-          const pad=0.05;
-          const sx=IMAGE_WIDTH*(1-2*pad)/dw,
-                sy=IMAGE_HEIGHT*(1-2*pad)/dh,
-                scale=Math.min(sx,sy);
-          const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
-          const tx=IMAGE_WIDTH/2-cx*scale,
-                ty=IMAGE_HEIGHT/2+cy*scale;
-          ctx.lineWidth=1/scale;
+          const dw = maxX - minX || 1, dh = maxY - minY || 1;
+          const pad = 0.05;
+          const sx = canvas.width  * (1 - 2*pad) / dw,
+                sy = canvas.height * (1 - 2*pad) / dh,
+                scale = Math.min(sx, sy);
+          const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+          const tx = canvas.width  / 2 - cx * scale,
+                ty = canvas.height / 2 + cy * scale;
+          ctx.lineWidth = 1 / scale;
 
+          /* ───── dibujado ───── */
           ctx.save();
-          ctx.translate(tx,ty);
-          ctx.scale(scale,-scale);
-          dxf.entities.forEach(e=>drawEntity(ctx,e));
+          ctx.translate(tx, ty);
+          ctx.scale(scale, -scale);
+
+          if (outMode === 'PNG') {
+            /* 1º: figuras/pl → relleno negro */
+            dxf.entities
+              .filter(e => e.type !== 'CIRCLE' && e.type !== 'ARC')
+              .forEach(e => drawEntity(ctx, e, true));
+
+            /* 2º: círculos/arcos → recorte blanco */
+            ctx.globalCompositeOperation = 'destination-out';
+            dxf.entities
+              .filter(e => e.type === 'CIRCLE' || e.type === 'ARC')
+              .forEach(e => drawEntity(ctx, e, true));
+
+            ctx.globalCompositeOperation = 'source-over';
+          } else {
+            /* BMP: sólo líneas negras */
+            dxf.entities.forEach(e => drawEntity(ctx, e, false));
+          }
+
           ctx.restore();
 
-          let imgData=ctx.getImageData(0,0,canvas.width,canvas.height);
-          imgData=forceBlackLines(imgData);
-          ctx.putImageData(imgData,0,0);
+          /* ───── salida según modo ───── */
+          if (outMode === 'BMP') {
+            let imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            imgData = forceBlackLines(imgData);
+            ctx.putImageData(imgData, 0, 0);
 
-          const mono=rgbaTo1Bit(canvas.width,canvas.height,imgData.data);
-          const bmp=encode1BitBmp(canvas.width,canvas.height,mono);
+            const mono = rgbaTo1Bit(canvas.width, canvas.height, imgData.data);
+            const bmp  = encode1BitBmp(canvas.width, canvas.height, mono);
 
-          let bin=''; new Uint8Array(bmp).forEach(b=>bin+=String.fromCharCode(b));
-          const dataUrl='data:image/bmp;base64,'+btoa(bin);
+            let bin = ''; new Uint8Array(bmp).forEach(b => bin += String.fromCharCode(b));
+            const dataUrl = 'data:image/bmp;base64,' + btoa(bin);
 
-          resolve({name:file.name.replace(/\.[^/.]+$/,'')+'.bmp',dataUrl});
-        } catch(err){reject({fileName:file.name,message:err.message});}
+            resolve({
+              name: file.name.replace(/\.[^/.]+$/, '') + '.bmp',
+              dataUrl
+            });
+
+          } else { /* PNG */
+            /* si se renderizó a más resolución, se reduce para guardar */
+            let exportCanvas = canvas;
+            if (scaleFactor !== 1) {
+              const c2 = document.createElement('canvas');
+              c2.width  = IMAGE_WIDTH;
+              c2.height = IMAGE_HEIGHT;
+              const c2ctx = c2.getContext('2d');
+              c2ctx.drawImage(canvas, 0, 0, c2.width, c2.height);
+              exportCanvas = c2;
+            }
+            const dataUrl = exportCanvas.toDataURL('image/png');
+            resolve({
+              name: file.name.replace(/\.[^/.]+$/, '') + '.png',
+              dataUrl
+            });
+          }
+
+        } catch(err){reject({fileName:file.name, message:err.message});}
       };
-      reader.onerror = () => reject({fileName:file.name,message:'Read error'});
+      reader.onerror = () => reject({fileName:file.name, message:'Read error'});
       reader.readAsText(file);
     });
+
 
   /* drag‑and‑drop */
   const onDrop = useCallback(async (files) => {
     setStatus(`Processing ${files.length} file(s)…`);
-    setBmpFiles([]); setErrors([]);
+    setFilesOut([]); setErrors([]);
     const results = await Promise.allSettled(files.map(f =>
       f.name.toLowerCase().endsWith('.dxf')
-        ? processDxfFile(f)
-        : Promise.reject({fileName:f.name,message:'Not a DXF file'})
+        ? processDxfFile(f, mode)
+        : Promise.reject({fileName:f.name, message:'Not a DXF file'})
     ));
     const outs=[], errs=[];
     results.forEach((r,i)=>{
-      if(r.status==='fulfilled'&&r.value) outs.push(r.value);
-      else errs.push(r.reason||{fileName:files[i].name,message:'Unknown error'});
+      if(r.status==='fulfilled' && r.value) outs.push(r.value);
+      else errs.push(r.reason || {fileName:files[i].name, message:'Unknown error'});
     });
-    setBmpFiles(outs); setErrors(errs);
-    setStatus(`Processed ${files.length} files. Generated ${outs.length} BMP(s).${errs.length?' '+errs.length+' error(s).':''}`);
-  }, []);
+    setFilesOut(outs); setErrors(errs);
+    setStatus(`Processed ${files.length} files. Generated ${outs.length} file(s).${errs.length ? ' '+errs.length+' error(s).' : ''}`);
+  }, [mode]);
 
-  const {getRootProps,getInputProps,isDragActive}=useDropzone({
+  const {getRootProps,getInputProps,isDragActive} = useDropzone({
     onDrop,
     accept:{
       'application/dxf':['.dxf'],
@@ -258,51 +325,64 @@ function App() {
 
   /*────────── Download All (ZIP) ──────────*/
   const downloadAll = useCallback(async () => {
-    if (!bmpFiles.length) return;
+    if (!filesOut.length) return;
     const zip = new JSZip();
-    bmpFiles.forEach(({name,dataUrl}) => {
+    filesOut.forEach(({name,dataUrl}) => {
       const base64 = dataUrl.split(',')[1];
       zip.file(name, base64, {base64:true});
     });
     const blob = await zip.generateAsync({type:'blob'});
-    saveAs(blob, 'dxf_bitmaps.zip');
-  }, [bmpFiles]);
+    saveAs(blob, 'dxf_images.zip');
+  }, [filesOut]);
 
   return (
     <div className="App">
-      <h1>DXF → BMP Converter (1‑bit)</h1>
+      <h1>DXF → {mode === 'BMP' ? 'BMP (1‑bit)' : 'PNG (Filled Black)'} Converter</h1>
 
-      <div {...getRootProps()} className={`dropzone ${isDragActive?'active':''}`}>
+      <label className="mode-toggle">
+        <input
+          type="checkbox"
+          checked={mode === 'PNG'}
+          onChange={e => setMode(e.target.checked ? 'PNG' : 'BMP')}
+        />
+        High Quality black filled PNG
+      </label>
+
+      <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''}`}>
         <input {...getInputProps()} />
         {isDragActive
-          ? <p>Drop DXF files here…</p>
-          : <p>Drag & drop DXF files here, or click to select</p>}
+          ? <p>Suelta los DXF aquí…</p>
+          : <p>Arrastra DXF aquí o haz clic para seleccionar</p>}
       </div>
 
-      {processingStatus && <p className="status">{processingStatus}</p>}
+      {status && <p className="status">{status}</p>}
 
-      {errors.length>0 && (
+      {errors.length > 0 && (
         <div className="errors">
           <h2>Errors:</h2>
           <ul>{errors.map((e,i)=><li key={i}><strong>{e.fileName}:</strong> {e.message}</li>)}</ul>
         </div>
       )}
 
-      {bmpFiles.length>0 && (
+      {filesOut.length > 0 && (
         <div className="results">
-          <h2>Generated BMPs:</h2>
+          <h2>Generated {mode}</h2>
           <button onClick={downloadAll}>Download All</button>
           <div className="image-grid">
-            {bmpFiles.map((b,i)=>(
+            {filesOut.map((f,i)=>(
               <div key={i} className="image-item">
                 <img
-                  src={b.dataUrl}
-                  alt={b.name}
+                  src={f.dataUrl}
+                  alt={f.name}
                   width={IMAGE_WIDTH}
                   height={IMAGE_HEIGHT}
-                  style={{imageRendering:'pixelated',border:'1px solid #ccc',background:'#fff'}}
+                  style={{
+                    imageRendering: mode === 'BMP' ? 'pixelated' : 'auto',
+                    border:'1px solid #ccc',
+                    background:'#fff'
+                  }}
                 />
-                <a href={b.dataUrl} download={b.name}>Download {b.name}</a>
+                <a href={f.dataUrl} download={f.name}>Download {f.name}</a>
               </div>
             ))}
           </div>
