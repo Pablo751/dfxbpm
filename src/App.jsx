@@ -218,9 +218,61 @@ function createScaledPattern(ctx, img, scale) {
   return ctx.createPattern(tile, 'repeat');
 }
 
+/*──────────────── Utilidad: agrupar segmentos LINE en polígonos cerrados ───────────────*/
+function buildClosedPolygons(entities, tol = 1e-3) {
+  /*  Devuelve un array de polígonos; cada polígono es un array de vértices
+      [{x,y}, {x,y}, …] con el primer vértice repetido al final.
+      Se consideran cerrados cuando el último punto coincide con el primero
+      dentro de la tolerancia “tol”.                                                */
+  const near = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) < tol;
 
-/* DXF → Image (BMP / PNG) – now with robust pattern‑scaling */
-/* DXF → Image (BMP / PNG) – handles scaling robustly */
+  /* Copia de los segmentos LINE que tengan 2 vértices válidos */
+  const segs = entities
+    .filter(e => e.type === 'LINE' && e.vertices?.length >= 2)
+    .map(e => ({
+      p0: { ...e.vertices[0] },
+      p1: { ...e.vertices[1] },
+      used: false,
+    }));
+
+  const polys = [];
+
+  /* Construir caminos enlazando extremos iguales */
+  for (const seg of segs) {
+    if (seg.used) continue;
+    const path = [seg.p0, seg.p1];
+    seg.used = true;
+
+    let extended = true;
+    while (extended) {
+      extended = false;
+      for (const other of segs) {
+        if (other.used) continue;
+        const head = path[path.length - 1];
+        if (near(head, other.p0)) {
+          path.push(other.p1);
+          other.used = true;
+          extended = true;
+          break;
+        }
+        if (near(head, other.p1)) {
+          path.push(other.p0);
+          other.used = true;
+          extended = true;
+          break;
+        }
+      }
+    }
+
+    /* ¿cierra sobre sí mismo? */
+    if (path.length > 2 && near(path[0], path[path.length - 1])) {
+      polys.push(path);
+    }
+  }
+  return polys;
+}
+
+/*──────────────── DXF → Image (BMP / PNG) – función completa actualizada ──────────────*/
 const processDxfFile = (file, outMode) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -248,38 +300,59 @@ const processDxfFile = (file, outMode) =>
         }
 
         /* BBox & transform ----------------------------------------- */
-        let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
-        dxf.entities.forEach(e => getEntityPoints(e).forEach(p=>{
-          minX=Math.min(minX,p.x); minY=Math.min(minY,p.y);
-          maxX=Math.max(maxX,p.x); maxY=Math.max(maxY,p.y);
-        }));
-        if (minX===Infinity) return resolve(null);
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        dxf.entities.forEach(e =>
+          getEntityPoints(e).forEach(p => {
+            minX = Math.min(minX, p.x);
+            minY = Math.min(minY, p.y);
+            maxX = Math.max(maxX, p.x);
+            maxY = Math.max(maxY, p.y);
+          })
+        );
+        if (minX === Infinity) return resolve(null);
 
-        const dw=maxX-minX||1, dh=maxY-minY||1, pad=0.05;
-        const sx=canvas.width *(1-2*pad)/dw,
-              sy=canvas.height*(1-2*pad)/dh,
-              scale=Math.min(sx,sy);
-        const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
-        const tx=canvas.width /2 - cx*scale,
-              ty=canvas.height/2 + cy*scale;
-        ctx.lineWidth = 1/scale;
+        const dw = maxX - minX || 1,
+          dh = maxY - minY || 1,
+          pad = 0.05;
+        const sx = (canvas.width  * (1 - 2 * pad)) / dw,
+          sy = (canvas.height * (1 - 2 * pad)) / dh,
+          scale = Math.min(sx, sy);
+        const cx = (minX + maxX) / 2,
+          cy = (minY + maxY) / 2;
+        const tx = canvas.width  / 2 - cx * scale,
+          ty = canvas.height / 2 + cy * scale;
+        ctx.lineWidth = 1 / scale;
 
-        /* 1: silhouette (or just lines) ---------------------------- */
+        /* 1: silueta (trazado + relleno) --------------------------- */
         ctx.save();
-        ctx.translate(tx,ty);
-        ctx.scale(scale,-scale);
+        ctx.translate(tx, ty);
+        ctx.scale(scale, -scale);
 
         const fillShapes = outMode !== 'BMP';
-        dxf.entities
-          .filter(e => e.type!=='CIRCLE' && e.type!=='ARC')
-          .forEach(e => drawEntity(ctx,e,fillShapes));
 
-        /* 2: punch circular holes ---------------------------------- */
+        /*─ a) entidades habituales ─*/
+        dxf.entities
+          .filter(e => e.type !== 'CIRCLE' && e.type !== 'ARC')
+          .forEach(e => drawEntity(ctx, e, fillShapes));
+
+        /*─ b) reconstruir polígonos cerrados a partir de LINE ─*/
+        if (fillShapes) {
+          const polys = buildClosedPolygons(dxf.entities);
+          polys.forEach(poly => {
+            ctx.beginPath();
+            ctx.moveTo(poly[0].x, poly[0].y);
+            poly.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+            ctx.closePath();
+            ctx.fill('evenodd');
+          });
+        }
+
+        /* 2: taladros circulares ----------------------------------- */
         if (outMode !== 'BMP') {
           ctx.globalCompositeOperation = 'destination-out';
           dxf.entities
-            .filter(e => e.type==='CIRCLE' || e.type==='ARC')
-            .forEach(e => drawEntity(ctx,e,true));
+            .filter(e => e.type === 'CIRCLE' || e.type === 'ARC')
+            .forEach(e => drawEntity(ctx, e, true));
           ctx.globalCompositeOperation = 'source-over';
         }
         ctx.restore();
@@ -288,37 +361,45 @@ const processDxfFile = (file, outMode) =>
 
         /* ---------- BMP output ------------------------------------ */
         if (outMode === 'BMP') {
-          let imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+          let imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           imgData = forceBlackLines(imgData);
-          ctx.putImageData(imgData,0,0);
+          ctx.putImageData(imgData, 0, 0);
 
-          const mono = rgbaTo1Bit(canvas.width,canvas.height,imgData.data);
-          const bmp  = encode1BitBmp(canvas.width,canvas.height,mono);
+          const mono = rgbaTo1Bit(canvas.width, canvas.height, imgData.data);
+          const bmp = encode1BitBmp(canvas.width, canvas.height, mono);
 
-          let bin=''; new Uint8Array(bmp).forEach(b=>bin+=String.fromCharCode(b));
+          let bin = '';
+          new Uint8Array(bmp).forEach(b => (bin += String.fromCharCode(b)));
           return resolve({
             name: `${baseName}.bmp`,
-            dataUrl: `data:image/bmp;base64,${btoa(bin)}`
+            dataUrl: `data:image/bmp;base64,${btoa(bin)}`,
           });
         }
 
         /* ---------- Solid‑black PNG ------------------------------- */
         if (outMode === 'PNG_FILL') {
           let outCan = canvas;
-          if (scaleFactor!==1) {
+          if (scaleFactor !== 1) {
             outCan = document.createElement('canvas');
-            outCan.width=IMAGE_WIDTH; outCan.height=IMAGE_HEIGHT;
-            outCan.getContext('2d').drawImage(canvas,0,0,outCan.width,outCan.height);
+            outCan.width = IMAGE_WIDTH;
+            outCan.height = IMAGE_HEIGHT;
+            outCan.getContext('2d').drawImage(
+              canvas,
+              0,
+              0,
+              outCan.width,
+              outCan.height
+            );
           }
           return resolve({
             name: `${baseName}.png`,
-            dataUrl: outCan.toDataURL('image/png')
+            dataUrl: outCan.toDataURL('image/png'),
           });
         }
 
         /* ---------- PNG with texture ------------------------------ */
-        const texSrc   = outMode==='PNG_TEX1' ? tex1 : tex2;
-        const texScale = outMode==='PNG_TEX1' ? TEX1_SCALE : TEX2_SCALE;
+        const texSrc = outMode === 'PNG_TEX1' ? tex1 : tex2;
+        const texScale = outMode === 'PNG_TEX1' ? TEX1_SCALE : TEX2_SCALE;
 
         const texImg = new Image();
         texImg.src = texSrc;
@@ -338,22 +419,31 @@ const processDxfFile = (file, outMode) =>
           ctx.restore();
 
           let outCan = canvas;
-          if (scaleFactor!==1) {
+          if (scaleFactor !== 1) {
             outCan = document.createElement('canvas');
-            outCan.width=IMAGE_WIDTH; outCan.height=IMAGE_HEIGHT;
-            outCan.getContext('2d').drawImage(canvas,0,0,outCan.width,outCan.height);
+            outCan.width = IMAGE_WIDTH;
+            outCan.height = IMAGE_HEIGHT;
+            outCan.getContext('2d').drawImage(
+              canvas,
+              0,
+              0,
+              outCan.width,
+              outCan.height
+            );
           }
           resolve({
             name: `${baseName}.png`,
-            dataUrl: outCan.toDataURL('image/png')
+            dataUrl: outCan.toDataURL('image/png'),
           });
         };
         texImg.onerror = () =>
           reject({ fileName: file.name, message: 'Texture load error' });
-
-      } catch(err){ reject({ fileName: file.name, message: err.message }); }
+      } catch (err) {
+        reject({ fileName: file.name, message: err.message });
+      }
     };
-    reader.onerror = () => reject({ fileName: file.name, message: 'Read error' });
+    reader.onerror = () =>
+      reject({ fileName: file.name, message: 'Read error' });
     reader.readAsText(file);
   });
 
