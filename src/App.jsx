@@ -457,8 +457,8 @@ const processDxfFile = (file, outMode) =>
     reader.readAsText(file);
   });
 
-  /*──────────────── BMP → JPG converter ──────────────────*/
-  const processBmpFile = (file) =>
+  /*──────────────── Image → JPG converter (BMP, JPEG, etc.) ──────────────────*/
+  const processImageFile = (file) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
@@ -478,7 +478,7 @@ const processDxfFile = (file, outMode) =>
           });
         };
         img.onerror = () =>
-          reject({ fileName: file.name, message: 'Could not decode BMP image' });
+          reject({ fileName: file.name, message: 'Could not decode image' });
         img.src = reader.result;
       };
       reader.onerror = () =>
@@ -493,7 +493,7 @@ const processDxfFile = (file, outMode) =>
     const results = await Promise.allSettled(files.map(f => {
       const ext = f.name.toLowerCase().split('.').pop();
       if (ext === 'dxf') return processDxfFile(f, mode);
-      if (ext === 'bmp') return processBmpFile(f);
+      if (ext === 'bmp' || ext === 'jpg' || ext === 'jpeg') return processImageFile(f);
       return Promise.reject({fileName:f.name, message:'Unsupported file type'});
     }));
     const outs=[], errs=[];
@@ -513,6 +513,7 @@ const processDxfFile = (file, outMode) =>
       'image/vnd.dxf':['.dxf'],
       'text/plain':['.dxf'],
       'image/bmp':['.bmp'],
+      'image/jpeg':['.jpg','.jpeg'],
     }
   });
 
@@ -543,7 +544,7 @@ const processDxfFile = (file, outMode) =>
         <input {...getInputProps()} />
         {isDragActive
           ? <p>Drop files here…</p>
-          : <p>Drop DXF or BMP files here, or click to select</p>}
+          : <p>Drop DXF, BMP, or JPEG files here, or click to select</p>}
       </div>
 
       {status && <p className="status">{status}</p>}
