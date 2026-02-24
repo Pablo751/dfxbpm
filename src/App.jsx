@@ -476,7 +476,7 @@ const processDxfFile = (file, outMode) =>
           const needsFill = outMode !== 'BMP';
 
           if (needsFill) {
-            /* Threshold to pure B&W then flood-fill enclosed regions */
+            /* Threshold to pure B&W */
             const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const d = imgData.data;
             const w = canvas.width, h = canvas.height;
@@ -487,34 +487,20 @@ const processDxfFile = (file, outMode) =>
               d[i + 3] = 255;
             }
 
-            /* Mark exterior white pixels via flood-fill from edges */
-            const exterior = new Uint8Array(w * h);
-            const stack = [];
-
-            for (let x = 0; x < w; x++) {
-              const ti = x, bi = (h - 1) * w + x;
-              if (d[ti * 4] === 255) { exterior[ti] = 1; stack.push(ti); }
-              if (d[bi * 4] === 255) { exterior[bi] = 1; stack.push(bi); }
-            }
-            for (let y = 1; y < h - 1; y++) {
-              const li = y * w, ri = y * w + w - 1;
-              if (d[li * 4] === 255) { exterior[li] = 1; stack.push(li); }
-              if (d[ri * 4] === 255) { exterior[ri] = 1; stack.push(ri); }
-            }
-
-            while (stack.length > 0) {
-              const idx = stack.pop();
-              const x = idx % w, y = (idx - x) / w;
-              if (x > 0     && !exterior[idx - 1] && d[(idx - 1) * 4] === 255) { exterior[idx - 1] = 1; stack.push(idx - 1); }
-              if (x < w - 1 && !exterior[idx + 1] && d[(idx + 1) * 4] === 255) { exterior[idx + 1] = 1; stack.push(idx + 1); }
-              if (y > 0     && !exterior[idx - w] && d[(idx - w) * 4] === 255) { exterior[idx - w] = 1; stack.push(idx - w); }
-              if (y < h - 1 && !exterior[idx + w] && d[(idx + w) * 4] === 255) { exterior[idx + w] = 1; stack.push(idx + w); }
-            }
-
-            /* Interior white pixels → black */
-            for (let i = 0; i < w * h; i++) {
-              if (!exterior[i] && d[i * 4] === 255) {
-                d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = 0;
+            /* Even-odd scanline fill: each time we cross a black boundary
+               we toggle inside/outside. This fills mat shapes (1 crossing
+               deep) but preserves holes within them (2 crossings deep). */
+            for (let y = 0; y < h; y++) {
+              let crossings = 0;
+              let inBlack = false;
+              for (let x = 0; x < w; x++) {
+                const idx = (y * w + x) * 4;
+                const isBlack = d[idx] === 0;
+                if (isBlack && !inBlack) crossings++;
+                inBlack = isBlack;
+                if (!isBlack && crossings % 2 === 1) {
+                  d[idx] = d[idx + 1] = d[idx + 2] = 0;
+                }
               }
             }
 
