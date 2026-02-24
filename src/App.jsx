@@ -19,6 +19,9 @@ const MODES = [
   { value: 'PNG_FILL',  label: 'PNG Black Fill' },
   { value: 'PNG_TEX1',  label: 'PNG Carpet' },
   { value: 'PNG_TEX2',  label: 'PNG Rubber' },
+  { value: 'JPG_FILL',  label: 'JPG Black Fill' },
+  { value: 'JPG_TEX1',  label: 'JPG Carpet' },
+  { value: 'JPG_TEX2',  label: 'JPG Rubber' },
 ];
 
 const TEX1_SCALE = 1;   // rubber mat   (0.25 ≈ 4× denser than original)
@@ -293,8 +296,8 @@ const processDxfFile = (file, outMode) =>
         canvas.height = IMAGE_HEIGHT * scaleFactor;
         const ctx = canvas.getContext('2d');
 
-        /* Background (only for BMP & solid‑black PNG) -------------- */
-        if (outMode === 'BMP' || outMode === 'PNG_FILL') {
+        /* Background (only for BMP & solid‑fill modes) --------------- */
+        if (outMode === 'BMP' || outMode === 'PNG_FILL' || outMode === 'JPG_FILL') {
           ctx.fillStyle = '#FFF';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
         }
@@ -376,8 +379,8 @@ const processDxfFile = (file, outMode) =>
           });
         }
 
-        /* ---------- Solid‑black PNG ------------------------------- */
-        if (outMode === 'PNG_FILL') {
+        /* ---------- Solid‑black PNG / JPG -------------------------- */
+        if (outMode === 'PNG_FILL' || outMode === 'JPG_FILL') {
           let outCan = canvas;
           if (scaleFactor !== 1) {
             outCan = document.createElement('canvas');
@@ -391,15 +394,20 @@ const processDxfFile = (file, outMode) =>
               outCan.height
             );
           }
+          const isJpg = outMode === 'JPG_FILL';
           return resolve({
-            name: `${baseName}.png`,
-            dataUrl: outCan.toDataURL('image/png'),
+            name: `${baseName}.${isJpg ? 'jpg' : 'png'}`,
+            dataUrl: isJpg
+              ? outCan.toDataURL('image/jpeg', 0.92)
+              : outCan.toDataURL('image/png'),
           });
         }
 
-        /* ---------- PNG with texture ------------------------------ */
-        const texSrc = outMode === 'PNG_TEX1' ? tex1 : tex2;
-        const texScale = outMode === 'PNG_TEX1' ? TEX1_SCALE : TEX2_SCALE;
+        /* ---------- PNG / JPG with texture ------------------------- */
+        const isCarpet = outMode === 'PNG_TEX1' || outMode === 'JPG_TEX1';
+        const texSrc   = isCarpet ? tex1 : tex2;
+        const texScale = isCarpet ? TEX1_SCALE : TEX2_SCALE;
+        const isJpgTex = outMode === 'JPG_TEX1' || outMode === 'JPG_TEX2';
 
         const texImg = new Image();
         texImg.src = texSrc;
@@ -432,8 +440,10 @@ const processDxfFile = (file, outMode) =>
             );
           }
           resolve({
-            name: `${baseName}.png`,
-            dataUrl: outCan.toDataURL('image/png'),
+            name: `${baseName}.${isJpgTex ? 'jpg' : 'png'}`,
+            dataUrl: isJpgTex
+              ? outCan.toDataURL('image/jpeg', 0.92)
+              : outCan.toDataURL('image/png'),
           });
         };
         texImg.onerror = () =>
@@ -489,7 +499,7 @@ const processDxfFile = (file, outMode) =>
 
   return (
     <div className="App">
-      <h1>DXF → {mode === 'BMP' ? 'BMP (1‑bit)' : 'PNG (Filled Black)'} Converter</h1>
+      <h1>DXF → {MODES.find(m => m.value === mode)?.label ?? mode} Converter</h1>
 
       <label className="mode-toggle">
         Mode:&nbsp;
