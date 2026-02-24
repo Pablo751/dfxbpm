@@ -457,15 +457,45 @@ const processDxfFile = (file, outMode) =>
     reader.readAsText(file);
   });
 
+  /*──────────────── BMP → JPG converter ──────────────────*/
+  const processBmpFile = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#FFF';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0);
+          const baseName = file.name.replace(/\.[^/.]+$/, '');
+          resolve({
+            name: `${baseName}.jpg`,
+            dataUrl: canvas.toDataURL('image/jpeg', 0.92),
+          });
+        };
+        img.onerror = () =>
+          reject({ fileName: file.name, message: 'Could not decode BMP image' });
+        img.src = reader.result;
+      };
+      reader.onerror = () =>
+        reject({ fileName: file.name, message: 'Read error' });
+      reader.readAsDataURL(file);
+    });
+
   /* drag‑and‑drop */
   const onDrop = useCallback(async (files) => {
     setStatus(`Processing ${files.length} file(s)…`);
     setFilesOut([]); setErrors([]);
-    const results = await Promise.allSettled(files.map(f =>
-      f.name.toLowerCase().endsWith('.dxf')
-        ? processDxfFile(f, mode)
-        : Promise.reject({fileName:f.name, message:'Not a DXF file'})
-    ));
+    const results = await Promise.allSettled(files.map(f => {
+      const ext = f.name.toLowerCase().split('.').pop();
+      if (ext === 'dxf') return processDxfFile(f, mode);
+      if (ext === 'bmp') return processBmpFile(f);
+      return Promise.reject({fileName:f.name, message:'Unsupported file type'});
+    }));
     const outs=[], errs=[];
     results.forEach((r,i)=>{
       if(r.status==='fulfilled' && r.value) outs.push(r.value);
@@ -481,7 +511,8 @@ const processDxfFile = (file, outMode) =>
       'application/dxf':['.dxf'],
       'application/x-dxf':['.dxf'],
       'image/vnd.dxf':['.dxf'],
-      'text/plain':['.dxf']
+      'text/plain':['.dxf'],
+      'image/bmp':['.bmp'],
     }
   });
 
@@ -511,8 +542,8 @@ const processDxfFile = (file, outMode) =>
       <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''}`}>
         <input {...getInputProps()} />
         {isDragActive
-          ? <p>Drop DFX files here…</p>
-          : <p>Drop DFX files here or click to select</p>}
+          ? <p>Drop files here…</p>
+          : <p>Drop DXF or BMP files here, or click to select</p>}
       </div>
 
       {status && <p className="status">{status}</p>}
