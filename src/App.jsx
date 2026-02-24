@@ -457,8 +457,8 @@ const processDxfFile = (file, outMode) =>
     reader.readAsText(file);
   });
 
-  /*──────────────── Image → JPG converter (BMP, JPEG, etc.) ──────────────────*/
-  const processImageFile = (file) =>
+  /*──────────────── Image → filled JPG/PNG (BMP, JPEG input) ──────────────────*/
+  const processImageFile = (file, outMode) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
@@ -471,10 +471,111 @@ const processDxfFile = (file, outMode) =>
           ctx.fillStyle = '#FFF';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(img, 0, 0);
+
           const baseName = file.name.replace(/\.[^/.]+$/, '');
+          const needsFill = outMode !== 'BMP';
+
+          if (needsFill) {
+            /* Threshold to pure B&W then flood-fill enclosed regions */
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const d = imgData.data;
+            const w = canvas.width, h = canvas.height;
+
+            for (let i = 0; i < d.length; i += 4) {
+              const avg = (d[i] + d[i + 1] + d[i + 2]) / 3;
+              d[i] = d[i + 1] = d[i + 2] = avg > 128 ? 255 : 0;
+              d[i + 3] = 255;
+            }
+
+            /* Mark exterior white pixels via flood-fill from edges */
+            const exterior = new Uint8Array(w * h);
+            const stack = [];
+
+            for (let x = 0; x < w; x++) {
+              const ti = x, bi = (h - 1) * w + x;
+              if (d[ti * 4] === 255) { exterior[ti] = 1; stack.push(ti); }
+              if (d[bi * 4] === 255) { exterior[bi] = 1; stack.push(bi); }
+            }
+            for (let y = 1; y < h - 1; y++) {
+              const li = y * w, ri = y * w + w - 1;
+              if (d[li * 4] === 255) { exterior[li] = 1; stack.push(li); }
+              if (d[ri * 4] === 255) { exterior[ri] = 1; stack.push(ri); }
+            }
+
+            while (stack.length > 0) {
+              const idx = stack.pop();
+              const x = idx % w, y = (idx - x) / w;
+              if (x > 0     && !exterior[idx - 1] && d[(idx - 1) * 4] === 255) { exterior[idx - 1] = 1; stack.push(idx - 1); }
+              if (x < w - 1 && !exterior[idx + 1] && d[(idx + 1) * 4] === 255) { exterior[idx + 1] = 1; stack.push(idx + 1); }
+              if (y > 0     && !exterior[idx - w] && d[(idx - w) * 4] === 255) { exterior[idx - w] = 1; stack.push(idx - w); }
+              if (y < h - 1 && !exterior[idx + w] && d[(idx + w) * 4] === 255) { exterior[idx + w] = 1; stack.push(idx + w); }
+            }
+
+            /* Interior white pixels → black */
+            for (let i = 0; i < w * h; i++) {
+              if (!exterior[i] && d[i * 4] === 255) {
+                d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = 0;
+              }
+            }
+
+            ctx.putImageData(imgData, 0, 0);
+          }
+
+          /* ── texture modes: overlay pattern on filled shapes ── */
+          const isTexMode = /TEX[12]$/.test(outMode);
+          if (isTexMode) {
+            /* Build alpha mask from black pixels */
+            const maskCan = document.createElement('canvas');
+            maskCan.width = canvas.width;
+            maskCan.height = canvas.height;
+            const maskCtx = maskCan.getContext('2d');
+            const src = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const sd = src.data;
+            for (let i = 0; i < sd.length; i += 4) {
+              sd[i + 3] = sd[i] === 0 ? 255 : 0;  /* black → opaque, white → transparent */
+            }
+            maskCtx.putImageData(src, 0, 0);
+
+            const isCarpet = /TEX1$/.test(outMode);
+            const texSrc   = isCarpet ? tex1 : tex2;
+            const texScale = isCarpet ? TEX1_SCALE : TEX2_SCALE;
+
+            const texImg2 = new Image();
+            texImg2.src = texSrc;
+            texImg2.onload = () => {
+              const pattern = createScaledPattern(maskCtx, texImg2, texScale);
+              maskCtx.save();
+              maskCtx.globalCompositeOperation = 'source-in';
+              maskCtx.fillStyle = pattern;
+              maskCtx.fillRect(0, 0, maskCan.width, maskCan.height);
+              maskCtx.restore();
+
+              /* White bg + textured shapes */
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              ctx.fillStyle = '#FFF';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(maskCan, 0, 0);
+
+              const isJpg = outMode.startsWith('JPG');
+              resolve({
+                name: `${baseName}.${isJpg ? 'jpg' : 'png'}`,
+                dataUrl: isJpg
+                  ? canvas.toDataURL('image/jpeg', 0.92)
+                  : canvas.toDataURL('image/png'),
+              });
+            };
+            texImg2.onerror = () =>
+              reject({ fileName: file.name, message: 'Texture load error' });
+            return;
+          }
+
+          /* ── flat fill or plain re-export ── */
+          const isJpg = outMode !== 'PNG_FILL';
           resolve({
-            name: `${baseName}.jpg`,
-            dataUrl: canvas.toDataURL('image/jpeg', 0.92),
+            name: `${baseName}.${isJpg ? 'jpg' : 'png'}`,
+            dataUrl: isJpg
+              ? canvas.toDataURL('image/jpeg', 0.92)
+              : canvas.toDataURL('image/png'),
           });
         };
         img.onerror = () =>
@@ -493,7 +594,7 @@ const processDxfFile = (file, outMode) =>
     const results = await Promise.allSettled(files.map(f => {
       const ext = f.name.toLowerCase().split('.').pop();
       if (ext === 'dxf') return processDxfFile(f, mode);
-      if (ext === 'bmp' || ext === 'jpg' || ext === 'jpeg') return processImageFile(f);
+      if (ext === 'bmp' || ext === 'jpg' || ext === 'jpeg') return processImageFile(f, mode);
       return Promise.reject({fileName:f.name, message:'Unsupported file type'});
     }));
     const outs=[], errs=[];
