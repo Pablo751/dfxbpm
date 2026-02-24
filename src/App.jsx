@@ -457,8 +457,8 @@ const processDxfFile = (file, outMode) =>
     reader.readAsText(file);
   });
 
-  /*──────────────── Image → filled JPG/PNG (BMP, JPEG input) ──────────────────*/
-  const processImageFile = (file, outMode) =>
+  /*──────────────── Image → JPG re-export (BMP, JPEG input) ──────────────────*/
+  const processImageFile = (file) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
@@ -471,97 +471,10 @@ const processDxfFile = (file, outMode) =>
           ctx.fillStyle = '#FFF';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(img, 0, 0);
-
           const baseName = file.name.replace(/\.[^/.]+$/, '');
-          const needsFill = outMode !== 'BMP';
-
-          if (needsFill) {
-            /* Threshold to pure B&W */
-            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const d = imgData.data;
-            const w = canvas.width, h = canvas.height;
-
-            for (let i = 0; i < d.length; i += 4) {
-              const avg = (d[i] + d[i + 1] + d[i + 2]) / 3;
-              d[i] = d[i + 1] = d[i + 2] = avg > 128 ? 255 : 0;
-              d[i + 3] = 255;
-            }
-
-            /* Even-odd scanline fill: each time we cross a black boundary
-               we toggle inside/outside. This fills mat shapes (1 crossing
-               deep) but preserves holes within them (2 crossings deep). */
-            for (let y = 0; y < h; y++) {
-              let crossings = 0;
-              let inBlack = false;
-              for (let x = 0; x < w; x++) {
-                const idx = (y * w + x) * 4;
-                const isBlack = d[idx] === 0;
-                if (isBlack && !inBlack) crossings++;
-                inBlack = isBlack;
-                if (!isBlack && crossings % 2 === 1) {
-                  d[idx] = d[idx + 1] = d[idx + 2] = 0;
-                }
-              }
-            }
-
-            ctx.putImageData(imgData, 0, 0);
-          }
-
-          /* ── texture modes: overlay pattern on filled shapes ── */
-          const isTexMode = /TEX[12]$/.test(outMode);
-          if (isTexMode) {
-            /* Build alpha mask from black pixels */
-            const maskCan = document.createElement('canvas');
-            maskCan.width = canvas.width;
-            maskCan.height = canvas.height;
-            const maskCtx = maskCan.getContext('2d');
-            const src = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const sd = src.data;
-            for (let i = 0; i < sd.length; i += 4) {
-              sd[i + 3] = sd[i] === 0 ? 255 : 0;  /* black → opaque, white → transparent */
-            }
-            maskCtx.putImageData(src, 0, 0);
-
-            const isCarpet = /TEX1$/.test(outMode);
-            const texSrc   = isCarpet ? tex1 : tex2;
-            const texScale = isCarpet ? TEX1_SCALE : TEX2_SCALE;
-
-            const texImg2 = new Image();
-            texImg2.src = texSrc;
-            texImg2.onload = () => {
-              const pattern = createScaledPattern(maskCtx, texImg2, texScale);
-              maskCtx.save();
-              maskCtx.globalCompositeOperation = 'source-in';
-              maskCtx.fillStyle = pattern;
-              maskCtx.fillRect(0, 0, maskCan.width, maskCan.height);
-              maskCtx.restore();
-
-              /* White bg + textured shapes */
-              ctx.clearRect(0, 0, canvas.width, canvas.height);
-              ctx.fillStyle = '#FFF';
-              ctx.fillRect(0, 0, canvas.width, canvas.height);
-              ctx.drawImage(maskCan, 0, 0);
-
-              const isJpg = outMode.startsWith('JPG');
-              resolve({
-                name: `${baseName}.${isJpg ? 'jpg' : 'png'}`,
-                dataUrl: isJpg
-                  ? canvas.toDataURL('image/jpeg', 0.92)
-                  : canvas.toDataURL('image/png'),
-              });
-            };
-            texImg2.onerror = () =>
-              reject({ fileName: file.name, message: 'Texture load error' });
-            return;
-          }
-
-          /* ── flat fill or plain re-export ── */
-          const isJpg = outMode !== 'PNG_FILL';
           resolve({
-            name: `${baseName}.${isJpg ? 'jpg' : 'png'}`,
-            dataUrl: isJpg
-              ? canvas.toDataURL('image/jpeg', 0.92)
-              : canvas.toDataURL('image/png'),
+            name: `${baseName}.jpg`,
+            dataUrl: canvas.toDataURL('image/jpeg', 0.92),
           });
         };
         img.onerror = () =>
@@ -580,7 +493,7 @@ const processDxfFile = (file, outMode) =>
     const results = await Promise.allSettled(files.map(f => {
       const ext = f.name.toLowerCase().split('.').pop();
       if (ext === 'dxf') return processDxfFile(f, mode);
-      if (ext === 'bmp' || ext === 'jpg' || ext === 'jpeg') return processImageFile(f, mode);
+      if (ext === 'bmp' || ext === 'jpg' || ext === 'jpeg') return processImageFile(f);
       return Promise.reject({fileName:f.name, message:'Unsupported file type'});
     }));
     const outs=[], errs=[];
