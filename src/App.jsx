@@ -457,7 +457,112 @@ const processDxfFile = (file, outMode) =>
     reader.readAsText(file);
   });
 
-  /*──────────────── Image → JPG re-export (BMP, JPEG input) ──────────────────*/
+  /*──────────────── BMP → filled JPG (clean 1-bit input) ─────────────────────*/
+  const processBmpFill = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#FFF';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0);
+
+          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const d = imgData.data;
+          const w = canvas.width, h = canvas.height;
+          const total = w * h;
+
+          /* Threshold to pure B&W */
+          for (let i = 0; i < d.length; i += 4) {
+            const avg = (d[i] + d[i + 1] + d[i + 2]) / 3;
+            d[i] = d[i + 1] = d[i + 2] = avg > 128 ? 255 : 0;
+            d[i + 3] = 255;
+          }
+
+          /* Flood-fill from edges → mark exterior white pixels */
+          const region = new Int32Array(total);  /* 0=unassigned, -1=exterior, >0=component id */
+          const stack = [];
+          for (let x = 0; x < w; x++) {
+            if (d[x * 4] === 255)                 { region[x] = -1;                 stack.push(x); }
+            const bi = (h - 1) * w + x;
+            if (d[bi * 4] === 255)                { region[bi] = -1;                stack.push(bi); }
+          }
+          for (let y = 1; y < h - 1; y++) {
+            const li = y * w;
+            if (d[li * 4] === 255)                { region[li] = -1;                stack.push(li); }
+            const ri = y * w + w - 1;
+            if (d[ri * 4] === 255)                { region[ri] = -1;                stack.push(ri); }
+          }
+          while (stack.length > 0) {
+            const idx = stack.pop();
+            const x = idx % w, y = (idx - x) / w;
+            const nb = [];
+            if (x > 0)     nb.push(idx - 1);
+            if (x < w - 1) nb.push(idx + 1);
+            if (y > 0)     nb.push(idx - w);
+            if (y < h - 1) nb.push(idx + w);
+            for (const n of nb) {
+              if (region[n] === 0 && d[n * 4] === 255) { region[n] = -1; stack.push(n); }
+            }
+          }
+
+          /* Label remaining white connected components & measure size */
+          let nextId = 1;
+          const sizes = {};
+          for (let i = 0; i < total; i++) {
+            if (d[i * 4] === 255 && region[i] === 0) {
+              const id = nextId++;
+              let size = 0;
+              const q = [i];
+              region[i] = id;
+              while (q.length > 0) {
+                const idx = q.pop();
+                size++;
+                const x = idx % w, y = (idx - x) / w;
+                const nb = [];
+                if (x > 0)     nb.push(idx - 1);
+                if (x < w - 1) nb.push(idx + 1);
+                if (y > 0)     nb.push(idx - w);
+                if (y < h - 1) nb.push(idx + w);
+                for (const n of nb) {
+                  if (region[n] === 0 && d[n * 4] === 255) { region[n] = id; q.push(n); }
+                }
+              }
+              sizes[id] = size;
+            }
+          }
+
+          /* Fill large interior regions black, keep small ones (holes) white.
+             Threshold: regions > 2% of image area = mat shape → fill black */
+          const sizeThreshold = total * 0.02;
+          for (let i = 0; i < total; i++) {
+            if (region[i] > 0 && sizes[region[i]] > sizeThreshold) {
+              d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = 0;
+            }
+          }
+
+          ctx.putImageData(imgData, 0, 0);
+          const baseName = file.name.replace(/\.[^/.]+$/, '');
+          resolve({
+            name: `${baseName}.jpg`,
+            dataUrl: canvas.toDataURL('image/jpeg', 0.92),
+          });
+        };
+        img.onerror = () =>
+          reject({ fileName: file.name, message: 'Could not decode BMP' });
+        img.src = reader.result;
+      };
+      reader.onerror = () =>
+        reject({ fileName: file.name, message: 'Read error' });
+      reader.readAsDataURL(file);
+    });
+
+  /*──────────────── JPEG → JPG re-export ───────────────────────────────────*/
   const processImageFile = (file) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -493,7 +598,8 @@ const processDxfFile = (file, outMode) =>
     const results = await Promise.allSettled(files.map(f => {
       const ext = f.name.toLowerCase().split('.').pop();
       if (ext === 'dxf') return processDxfFile(f, mode);
-      if (ext === 'bmp' || ext === 'jpg' || ext === 'jpeg') return processImageFile(f);
+      if (ext === 'bmp') return processBmpFill(f);
+      if (ext === 'jpg' || ext === 'jpeg') return processImageFile(f);
       return Promise.reject({fileName:f.name, message:'Unsupported file type'});
     }));
     const outs=[], errs=[];
